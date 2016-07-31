@@ -1,4 +1,6 @@
-const backoff = require('backoff');
+'use strict';
+
+var backoff = require('backoff');
 
 /**
  * Creates a new instance of AMQP client with automatic connection recovery
@@ -16,126 +18,131 @@ const backoff = require('backoff');
  * @returns {object} decorated instance of amqp client (original instance is not
  * modified)
  */
-module.exports = function withAutoRecovery(amqp, o = {}) {
-  const onError = o.onError || (() => {});
-  const isErrorUnrecoverable = o.isErrorUnrecoverable || (() => false);
+module.exports = function withAutoRecovery(amqp) {
+  var o = arguments.length <= 1 || arguments[1] === undefined ? {} : arguments[1];
+
+  var onError = o.onError || function () {};
+  var isErrorUnrecoverable = o.isErrorUnrecoverable || function () {
+    return false;
+  };
   return Object.create(amqp, {
     connect: {
       value: function connect(url, connectCallback) {
-        let activeConnection = null;
-        const spec = backoff.call((cb) => {
-            amqp.connect(url, (err, con) => {
-              if (err) {
-                connectCallback(err);
-                cb(!isErrorUnrecoverable(err) ? err : null);
-                return
+        var activeConnection = null;
+        var spec = backoff.call(function (cb) {
+          amqp.connect(url, function (err, con) {
+            if (err) {
+              connectCallback(err);
+              cb(!isErrorUnrecoverable(err) ? err : null);
+              return;
+            }
+            var lastError = void 0;
+            activeConnection = con;
+            con.on('error', function (err) {
+              lastError = err;
+              onError(new Error('Connection failed($ {\n                err.message\n              })'));
+            });
+            var connectionClosed = false;
+            con.on('close', function () {
+              connectionClosed = true;
+              if (activeConnection) {
+                // we were able to establish connection but something went
+                // wrong later on -> reconnect
+                if (!lastError || !isErrorUnrecoverable(lastError)) {
+                  process.nextTick(connect, url, connectCallback);
+                }
               }
-              let lastError;
-              activeConnection = con;
-              con.on('error', (err) => {
+              // the only case when activeConnection might be null is if
+              // connection was explicitly terminated by the client through
+              // (decorated) connection.close()
+              // in which case we should do nothing
+            });
+            var closeConnection = function closeConnection() {
+              try {
+                con.close();
+              } catch (e) {
+                // https://github.com/squaremo/amqp.node/blob/v0.4.2/lib/connection.js#L364
+                if (e.name !== 'IllegalOperationError') {
+                  throw e;
+                }
+              }
+            };
+            var channelCallback = function channelCallback(cb, err, ch) {
+              if (err) {
+                // todo: check for channelMax
                 lastError = err;
-                onError(new Error(`Connection failed (${err.message})`));
+                onError(new Error('Failed to create a channel($ {\n                  err.message\n                })'));
+                cb(err);
+                closeConnection();
+                return;
+              }
+              ch.on('error', function (err) {
+                lastError = err;
+                onError(new Error('Channel failed($ {\n                  err.message\n                })'));
               });
-              let connectionClosed = false;
-              con.on('close', () => {
-                connectionClosed = true;
-                if (activeConnection) {
-                  // we were able to establish connection but something went
-                  // wrong later on -> reconnect
-                  if (!lastError || !isErrorUnrecoverable(lastError)) {
-                    process.nextTick(connect, url, connectCallback);
-                  }
-                }
-                // the only case when activeConnection might be null is if
-                // connection was explicitly terminated by the client through
-                // (decorated) connection.close()
-                // in which case we should do nothing
+              var channelClosedByClient = void 0;
+              var channelClosed = false;
+              ch.on('close', function () {
+                channelClosed = true;
+                // do not close the connection if channel was deliberately
+                // closed by the client
+                channelClosedByClient || closeConnection();
               });
-              const closeConnection = () => {
-                try {
-                  con.close();
-                } catch (e) {
-                  // https://github.com/squaremo/amqp.node/blob/v0.4.2/lib/connection.js#L364
-                  if (e.name !== 'IllegalOperationError') {
-                    throw e;
-                  }
-                }
-              };
-              const channelCallback = (cb, err, ch) => {
-                if (err) {
-                  // todo: check for channelMax
-                  lastError = err;
-                  onError(new Error(
-                    `Failed to create a channel (${err.message})`));
-                  cb(err);
-                  closeConnection();
-                  return
-                }
-                ch.on('error', (err) => {
-                  lastError = err;
-                  onError(new Error(`Channel failed (${err.message})`));
-                });
-                let channelClosedByClient;
-                let channelClosed = false;
-                ch.on('close', () => {
-                  channelClosed = true;
-                  // do not close the connection if channel was deliberately
-                  // closed by the client
-                  channelClosedByClient || closeConnection();
-                });
-                cb(null, new Proxy(ch, {
-                  get: (target, name) => {
-                    switch (name) {
-                      case 'close':
-                        return function close(cb) {
-                          channelClosedByClient = true;
-                          target.close(cb);
-                        };
-                      case 'closed':
-                        return channelClosed;
-                      default:
-                        return target[name];
-                    }
-                  }
-                }));
-              };
-              connectCallback(null, Object.create(con, {
-                createChannel: {
-                  value: function createChannel(cb) {
-                    con.createChannel(channelCallback.bind(null, cb));
-                  }
-                },
-                createConfirmChannel: {
-                  value: function createConfirmChannel(cb) {
-                    con.createConfirmChannel(channelCallback.bind(null, cb));
-                  }
-                },
-                close: {
-                  value: function close(cb) {
-                    activeConnection = null;
-                    con.close(cb);
-                  }
-                },
-                // not part of amqplib
-                closeAndReconnect: {
-                  value: function closeAndReconnect(cb) {
-                    con.close(cb);
-                  }
-                },
-                closed: {
-                  get: function () {
-                    return connectionClosed;
+              cb(null, new Proxy(ch, {
+                get: function get(target, name) {
+                  switch (name) {
+                    case 'close':
+                      return function close(cb) {
+                        channelClosedByClient = true;
+                        target.close(cb);
+                      };
+                    case 'closed':
+                      return channelClosed;
+                    default:
+                      return target[name];
                   }
                 }
               }));
-              cb();
-            });
-          }, () => {});
-        if (o.configureBackoff) { 
-          o.configureBackoff(spec, backoff); 
+            };
+            connectCallback(null, Object.create(con, {
+              createChannel: {
+                value: function createChannel(cb) {
+                  con.createChannel(channelCallback.bind(null, cb));
+                }
+              },
+              createConfirmChannel: {
+                value: function createConfirmChannel(cb) {
+                  con.createConfirmChannel(channelCallback.bind(null, cb));
+                }
+              },
+              close: {
+                value: function close(cb) {
+                  activeConnection = null;
+                  con.close(cb);
+                }
+              },
+              // not part of amqplib
+              closeAndReconnect: {
+                value: function closeAndReconnect(cb) {
+                  con.close(cb);
+                }
+              },
+              closed: {
+                get: function get() {
+                  return connectionClosed;
+                }
+              }
+            }));
+            cb();
+          });
+        }, function () {});
+        if (o.configureBackoff) {
+          o.configureBackoff(spec, backoff);
         } else {
           spec.setStrategy(new backoff.ExponentialStrategy({
-            randomisationFactor: 0.1, initialDelay: 1000, maxDelay: 30000
+            randomisationFactor: 0.1,
+            initialDelay: 1000,
+            maxDelay: 30000
           }));
         }
         spec.start();
