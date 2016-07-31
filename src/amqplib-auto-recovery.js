@@ -19,13 +19,11 @@ var backoff = require('backoff');
  * modified)
  */
 module.exports = function withAutoRecovery(amqp) {
-  var o = arguments.length <= 1 || arguments[1] === undefined ? {} : arguments[1];
-
   var onError = o.onError || function () {};
   var isErrorUnrecoverable = o.isErrorUnrecoverable || function () {
     return false;
   };
-  return Object.create(amqp, {
+  var lib = Object.create(amqp, {
     connect: {
       value: function connect(url, connectCallback) {
         var activeConnection = null;
@@ -40,7 +38,7 @@ module.exports = function withAutoRecovery(amqp) {
             activeConnection = con;
             con.on('error', function (err) {
               lastError = err;
-              onError(new Error('Connection failed($ {\n                err.message\n              })'));
+              onError(new Error('Connection failed(' + err.message + ')'));
             });
             var connectionClosed = false;
             con.on('close', function () {
@@ -71,7 +69,7 @@ module.exports = function withAutoRecovery(amqp) {
               if (err) {
                 // todo: check for channelMax
                 lastError = err;
-                onError(new Error('Failed to create a channel($ {\n                  err.message\n                })'));
+                onError(new Error('Failed to create a channel(' + err.message + ')'));
                 cb(err);
                 closeConnection();
                 return;
