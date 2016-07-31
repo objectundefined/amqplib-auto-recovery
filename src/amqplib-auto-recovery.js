@@ -18,7 +18,8 @@ var backoff = require('backoff');
  * @returns {object} decorated instance of amqp client (original instance is not
  * modified)
  */
-module.exports = function withAutoRecovery(amqp) {
+module.exports = function withAutoRecovery(amqp, opts) {
+  var o = opts || {};
   var onError = o.onError || function () {};
   var isErrorUnrecoverable = o.isErrorUnrecoverable || function () {
     return false;
